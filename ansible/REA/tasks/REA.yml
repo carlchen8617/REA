@@ -8,10 +8,6 @@
 
 - debug: msg="{{azs.availability_zones.1.zone_name}}"   
 
-- name: Check if a string is a valid IPv4
-  debug:
-    msg: "'single_ipv4_val': {{ cidr_block | ipsubnet(20, 2) }}" 
-
 - name: Create VPC
   ec2_vpc_net:
     name: "{{ vpc_name }}"
@@ -100,6 +96,11 @@
         - 4567
         cidr_ip: 0.0.0.0/0
         rule_desc: allow all on port 4567
+      - proto: tcp
+        ports:
+        - 22
+        cidr_ip: 0.0.0.0/0
+        rule_desc: allow all ssh in
     tags:
       Name: "REA_Server_SG_App"
   register: sgApp    
@@ -168,7 +169,7 @@
     
 - debug: 
     msg:
-    - "OK Done!, Wait for approx three minutes and put the following URL in your brower and get greeted: {{lb.results.0.elb.dns_name}}"
+    - "OK Done!, Wait for approx three minutes and put the following URL in your browser and get greeted: {{lb.results.0.elb.dns_name}}"
 
 
       
