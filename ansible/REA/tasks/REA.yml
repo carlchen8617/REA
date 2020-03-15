@@ -1,0 +1,174 @@
+---
+# Task for REA Hello Word App Challenge
+
+- name: Find AWS availability zone in your region
+  aws_az_facts:
+    region: "{{ region }}"
+  register: azs
+
+- debug: msg="{{azs.availability_zones.1.zone_name}}"   
+
+- name: Check if a string is a valid IPv4
+  debug:
+    msg: "'single_ipv4_val': {{ cidr_block | ipsubnet(20, 2) }}" 
+
+- name: Create VPC
+  ec2_vpc_net:
+    name: "{{ vpc_name }}"
+    cidr_block: "{{ cidr_block }}"
+    region: "{{ region }}"
+    state: present
+  register: vpc   
+
+- name: Create the Public Subnet
+  ec2_vpc_subnet:
+    cidr: "{{cidr_block | ipsubnet(24,item.cidr_block_no+1)}}"
+    az: "{{item.az}}"
+    vpc_id: "{{vpc.vpc.id}}"
+    map_public: yes
+    tags:
+      Name: "REA-Challenge-public"
+  register: public_subnet
+  with_items:
+      - { cidr_block_no: 0, az: "{{azs.availability_zones.0.zone_name}}" }
+  
+
+- name: Create Internet Gateway 
+  ec2_vpc_igw:
+    vpc_id: "{{ vpc.vpc.id }}"
+    region: "{{ region }}"
+    state: "present"
+    tags:
+      Name: "REA-Chanllenge-IGW"
+  register: igw
+
+  
+- name: Create Route Table for Public Subnet  
+  ec2_vpc_route_table:
+    vpc_id: "{{ vpc.vpc.id }}"
+    routes:
+      - dest: "0.0.0.0/0"
+        gateway_id: "{{igw.gateway_id}}"
+    subnets:
+      - "{{item.subnet_id}}"
+    tags:
+      Name: "public_subnet_route_tabele"  
+  register: public_subnet_rt
+  with_items:
+  - { id: 0, subnet_id: "{{public_subnet.results.0.subnet.id}}" }
+
+
+- name: Create a Key Pair So You Can SSH to the server 
+  ec2_key:
+    name: "REA-Key"
+  register: ec2_key_pair
+
+- name: Save private key
+  copy: content="{{ ec2_key_pair.key.private_key }}" dest="./REA-pem" mode=0600
+  when: ec2_key_pair.changed
+
+- name: Create Security Group Load Balancer
+  ec2_group:
+    name: "REA-Challenge-SG-LB"
+    description: The security group is applied on the server to allow SSH access and port 80
+    vpc_id: "{{ vpc.vpc.id }}"
+    region: "{{ region }}"
+    rules:
+      - proto: tcp
+        ports:
+        - 80
+        cidr_ip: 0.0.0.0/0
+        rule_desc: allow all on port 80
+      - proto: tcp
+        ports:
+        - 22
+        cidr_ip: 0.0.0.0/0
+        rule_desc: allow all ssh in
+    tags:
+      Name: "REA_Server_SG"
+  register: sg       
+
+- name: Create Security Group App Server
+  ec2_group:
+    name: "REA-Challenge-SG-App"
+    description: The security group for port 4567
+    vpc_id: "{{ vpc.vpc.id }}"
+    region: "{{ region }}"
+    rules:
+      - proto: tcp
+        ports:
+        - 4567
+        cidr_ip: 0.0.0.0/0
+        rule_desc: allow all on port 4567
+    tags:
+      Name: "REA_Server_SG_App"
+  register: sgApp    
+
+- name: Create Launch Configuration
+  ec2_lc:
+    name: "App-sever-config"
+    image_id: "ami-0abeb10ffb66ec135"
+    instance_type: "t2.micro"  
+    key_name: "REA-Key"
+    security_groups:
+      - "{{sgApp.group_id}}"
+    user_data: |
+      #!/bin/bash
+      set -e
+      gem install bundler
+      git clone https://github.com/rea-cruitment/simple-sinatra-app.git
+      cd simple-sinatra-app
+      sudo bundle install
+      sudo bundle exec rackup -p4567 --host 0.0.0.0
+  register: lc
+
+- name: Create Load Balancer
+  ec2_elb_lb:
+    name: "lb"
+    region: "{{region}}"
+    subnets:
+      - "{{item.subnet_id}}"
+    state: present
+    health_check: 
+        ping_protocol: tcp 
+        ping_port: 4567
+        response_timeout: 5 
+        interval: 30 
+        unhealthy_threshold: 5
+        healthy_threshold: 10
+    listeners:
+      - protocol: http
+        load_balancer_port: 80
+        instance_port: 4567
+      - protocol: tcp
+        load_balancer_port: 22
+        instance_port: 22
+    security_group_names: "REA-Challenge-SG"
+    tags:
+      Name: "REA_Load_Balancer"
+  register: lb
+  with_items:
+  - { id: 0, subnet_id: "{{public_subnet.results.0.subnet.id}}" }
+
+- name: Create Auto-Scaling group
+  ec2_asg:
+    name: "REA_Auto_Scaling"
+    load_balancers: "{{lb.results.0.elb.name}}"
+    launch_config_name: "App-sever-config"
+    desired_capacity: 1
+    min_size: 1
+    max_size: 1
+    tags:
+      - Name: "REA-ASG"
+    vpc_zone_identifier:
+      - "{{item.subnet_id}}"      
+  with_items:
+  - { id: 0, subnet_id: "{{public_subnet.results.0.subnet.id}}" }
+
+    
+- debug: 
+    msg:
+    - "OK Done!, Wait for approx three minutes and put the following URL in your brower and get greeted: {{lb.results.0.elb.dns_name}}"
+
+
+      
